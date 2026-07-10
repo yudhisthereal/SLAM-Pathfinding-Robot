@@ -3,12 +3,12 @@
 // Motor pins
 const int RPWM_RIGHT = 12;
 const int LPWM_RIGHT = 14;
-const int RPWM_LEFT  = 32;
-const int LPWM_LEFT  = 33;
+const int RPWM_LEFT = 32;
+const int LPWM_LEFT = 33;
 
 // IR sensors
 const int RIGHT_IR = 4;
-const int LEFT_IR  = 2;
+const int LEFT_IR = 2;
 
 const float DEFAULT_MAX_SPEED = 4.0;
 float maxSpeed = DEFAULT_MAX_SPEED;
@@ -21,10 +21,17 @@ const int IR_THRESHOLD = 2048;
 float leftWheelAngle = 0.0, rightWheelAngle = 0.0;
 int lastLeftIRState = -1, lastRightIRState = -1;
 
-void updateWheelAngles() {
+// ---- Movement direction flags (manual mode) ----
+bool movingForward = false;
+bool movingBackward = false;
+bool turningLeft = false;
+bool turningRight = false;
+
+void updateWheelAngles()
+{
     int leftReading = analogRead(LEFT_IR);
     int rightReading = analogRead(RIGHT_IR);
-    int leftState  = (leftReading  < IR_THRESHOLD) ? 0 : 1;
+    int leftState = (leftReading < IR_THRESHOLD) ? 0 : 1;
     int rightState = (rightReading < IR_THRESHOLD) ? 0 : 1;
     if (lastLeftIRState == 1 && leftState == 0)
         leftWheelAngle += RAD_PER_TRANSITION;
@@ -35,7 +42,8 @@ void updateWheelAngles() {
 }
 
 // ---- Odometry ----
-class Odometry {
+class Odometry
+{
 private:
     double wheelRadius = 0.0975;
     double wheelBase = 0.33;
@@ -44,11 +52,14 @@ private:
     double x = 0, y = 0, theta = 0;
     double linearVel = 0, angularVel = 0;
     bool firstUpdate = true;
+
 public:
     void setWheelRadius(double r) { wheelRadius = max(0.01, r); }
-    void setWheelBase(double b)   { wheelBase = max(0.01, b); }
-    void update(double leftPos, double rightPos, double currentTime) {
-        if (firstUpdate) {
+    void setWheelBase(double b) { wheelBase = max(0.01, b); }
+    void update(double leftPos, double rightPos, double currentTime)
+    {
+        if (firstUpdate)
+        {
             prevLeftPos = leftPos;
             prevRightPos = rightPos;
             prevTime = currentTime;
@@ -56,23 +67,32 @@ public:
             return;
         }
         double dt = currentTime - prevTime;
-        if (dt <= 0) return;
-        double leftDist  = (leftPos - prevLeftPos) * wheelRadius;
+        if (dt <= 0)
+            return;
+        double leftDist = (leftPos - prevLeftPos) * wheelRadius;
         double rightDist = (rightPos - prevRightPos) * wheelRadius;
-        linearVel  = (leftDist + rightDist) / (2.0 * dt);
+        linearVel = (leftDist + rightDist) / (2.0 * dt);
         angularVel = (rightDist - leftDist) / (wheelBase * dt);
         double distance = (leftDist + rightDist) / 2.0;
         double deltaTheta = (rightDist - leftDist) / wheelBase;
         theta += deltaTheta;
         x += distance * cos(theta);
         y += distance * sin(theta);
-        while (theta > M_PI) theta -= 2 * M_PI;
-        while (theta < -M_PI) theta += 2 * M_PI;
+        while (theta > M_PI)
+            theta -= 2 * M_PI;
+        while (theta < -M_PI)
+            theta += 2 * M_PI;
         prevLeftPos = leftPos;
         prevRightPos = rightPos;
         prevTime = currentTime;
     }
-    void reset() { x = y = theta = 0; linearVel = angularVel = 0; prevLeftPos = prevRightPos = 0; firstUpdate = true; }
+    void reset()
+    {
+        x = y = theta = 0;
+        linearVel = angularVel = 0;
+        prevLeftPos = prevRightPos = 0;
+        firstUpdate = true;
+    }
     double getX() const { return x; }
     double getY() const { return y; }
     double getTheta() const { return theta; }
@@ -83,44 +103,60 @@ public:
 Odometry odom;
 
 // ---- Velocity smoother ----
-class VelocitySmoother {
+class VelocitySmoother
+{
 private:
     double targetLeft = 0.0, targetRight = 0.0;
     double currentLeft = 0.0, currentRight = 0.0;
     double smoothingFactor = 0.15;
+
 public:
     VelocitySmoother(double factor = 0.15) : smoothingFactor(factor) {}
-    void setTarget(double left, double right) {
+    void setTarget(double left, double right)
+    {
         targetLeft = left;
         targetRight = right;
     }
-    void update(double dt) {
-        if (dt > 0.1) dt = 0.032;
+    void update(double dt)
+    {
+        if (dt > 0.1)
+            dt = 0.032;
         currentLeft += (targetLeft - currentLeft) * smoothingFactor;
         currentRight += (targetRight - currentRight) * smoothingFactor;
-        if (fabs(currentLeft) < 0.005) currentLeft = 0.0;
-        if (fabs(currentRight) < 0.005) currentRight = 0.0;
+        if (fabs(currentLeft) < 0.005)
+            currentLeft = 0.0;
+        if (fabs(currentRight) < 0.005)
+            currentRight = 0.0;
     }
     double getLeftSpeed() const { return currentLeft; }
     double getRightSpeed() const { return currentRight; }
     void reset() { targetLeft = targetRight = currentLeft = currentRight = 0.0; }
 };
 
-// FIX: correct object declaration
-VelocitySmoother smoother;   // default constructor with factor=0.15
+VelocitySmoother smoother;
 
 // ---- Motor driver ----
-void setMotorPWM(int rpwm, int lpwm, int speed) {
-    if (speed >= 0) { analogWrite(rpwm, speed); analogWrite(lpwm, 0); }
-    else { analogWrite(rpwm, 0); analogWrite(lpwm, -speed); }
+void setMotorPWM(int rpwm, int lpwm, int speed)
+{
+    if (speed >= 0)
+    {
+        analogWrite(rpwm, speed);
+        analogWrite(lpwm, 0);
+    }
+    else
+    {
+        analogWrite(rpwm, 0);
+        analogWrite(lpwm, -speed);
+    }
 }
 
-void setWheelSpeeds(float leftRadPerSec, float rightRadPerSec) {
-    leftRadPerSec  = constrain(leftRadPerSec,  -maxSpeed, maxSpeed);
+void setWheelSpeeds(float leftRadPerSec, float rightRadPerSec)
+{
+    leftRadPerSec = constrain(leftRadPerSec, -maxSpeed, maxSpeed);
     rightRadPerSec = constrain(rightRadPerSec, -maxSpeed, maxSpeed);
-    int leftPWM  = (int)round(leftRadPerSec  * PWM_PER_RAD_S);
+    int leftPWM = (int)round(leftRadPerSec * PWM_PER_RAD_S);
     int rightPWM = (int)round(rightRadPerSec * PWM_PER_RAD_S);
-    leftPWM  = constrain(leftPWM,  -255, 255);
+    leftPWM = constrain(leftPWM, -255, 255);
     rightPWM = constrain(rightPWM, -255, 255);
     setMotorPWM(RPWM_LEFT, LPWM_LEFT, leftPWM);
     setMotorPWM(RPWM_RIGHT, LPWM_RIGHT, rightPWM);
@@ -132,11 +168,15 @@ bool pathActive = false;
 bool pathExists = false;
 
 #define MAX_WAYPOINTS 50
-struct Waypoint { double x, y; };
+struct Waypoint
+{
+    double x, y;
+};
 Waypoint pathPoints[MAX_WAYPOINTS];
 unsigned int numWaypoints = 0;
 unsigned int pathIndex = 0;
 
+// (unused now, kept for compatibility)
 float manualTargetLeft = 0.0, manualTargetRight = 0.0;
 
 // ---- Command parser ----
@@ -144,46 +184,61 @@ float manualTargetLeft = 0.0, manualTargetRight = 0.0;
 char cmdBuffer[CMD_BUFFER_SIZE];
 int cmdIndex = 0;
 
-void processCommand(const char* cmd) {
-    if (strlen(cmd) == 0) return;
+void processCommand(const char *cmd)
+{
+    if (strlen(cmd) == 0)
+        return;
 
-    if (strncmp(cmd, "MODE:", 5) == 0) {
-        const char* mode = cmd + 5;
-        if (strcmp(mode, "auto") == 0) {
+    if (strncmp(cmd, "MODE:", 5) == 0)
+    {
+        const char *mode = cmd + 5;
+        if (strcmp(mode, "auto") == 0)
+        {
             autoMode = true;
+            // clear manual flags when switching to auto
+            movingForward = movingBackward = turningLeft = turningRight = false;
             pathActive = pathExists;
-            if (pathActive) {
+            if (pathActive)
+            {
                 pathIndex = 0;
                 Serial.println("[Mode] Auto enabled");
-            } else {
+            }
+            else
+            {
                 Serial.println("[Mode] Auto enabled (no path)");
             }
-        } else if (strcmp(mode, "manual") == 0 || strcmp(mode, "idle") == 0) {
+        }
+        else if (strcmp(mode, "manual") == 0 || strcmp(mode, "idle") == 0)
+        {
             autoMode = false;
             pathActive = false;
-            manualTargetLeft = 0.0;
-            manualTargetRight = 0.0;
+            movingForward = movingBackward = turningLeft = turningRight = false;
             smoother.setTarget(0.0, 0.0);
             setWheelSpeeds(0.0, 0.0);
             Serial.println("[Mode] Manual/Idle");
-        } else {
+        }
+        else
+        {
             Serial.println("[Mode] Unknown");
         }
         return;
     }
 
-    if (strncmp(cmd, "PATH:", 5) == 0) {
+    if (strncmp(cmd, "PATH:", 5) == 0)
+    {
         numWaypoints = 0;
         pathExists = false;
         pathActive = false;
-        const char* data = cmd + 5;
+        const char *data = cmd + 5;
         char buffer[256];
         strncpy(buffer, data, sizeof(buffer) - 1);
         buffer[sizeof(buffer) - 1] = '\0';
-        char* pair = strtok(buffer, ";");
-        while (pair && numWaypoints < MAX_WAYPOINTS) {
-            char* comma = strchr(pair, ',');
-            if (comma) {
+        char *pair = strtok(buffer, ";");
+        while (pair && numWaypoints < MAX_WAYPOINTS)
+        {
+            char *comma = strchr(pair, ',');
+            if (comma)
+            {
                 *comma = '\0';
                 double x = atof(pair);
                 double y = atof(comma + 1);
@@ -193,15 +248,19 @@ void processCommand(const char* cmd) {
             }
             pair = strtok(NULL, ";");
         }
-        if (numWaypoints > 0) {
+        if (numWaypoints > 0)
+        {
             pathExists = true;
             Serial.printf("[Path] Stored %d waypoints\n", numWaypoints);
-            if (autoMode) {
+            if (autoMode)
+            {
                 pathActive = true;
                 pathIndex = 0;
                 Serial.println("[Path] Auto following started");
             }
-        } else {
+        }
+        else
+        {
             pathExists = false;
             pathActive = false;
             Serial.println("[Path] Empty path");
@@ -209,77 +268,106 @@ void processCommand(const char* cmd) {
         return;
     }
 
-    if (strncmp(cmd, "CONFIG:", 7) == 0) {
+    if (strncmp(cmd, "CONFIG:", 7) == 0)
+    {
         char buffer[256];
         strncpy(buffer, cmd + 7, sizeof(buffer) - 1);
         buffer[sizeof(buffer) - 1] = '\0';
-        char* token = strtok(buffer, ",");
+        char *token = strtok(buffer, ",");
         int idx = 0;
         float vals[5];
-        while (token && idx < 5) {
+        while (token && idx < 5)
+        {
             vals[idx++] = atof(token);
             token = strtok(NULL, ",");
         }
-        if (idx == 5) {
+        if (idx == 5)
+        {
             odom.setWheelRadius(max(0.01f, vals[0]));
             odom.setWheelBase(max(0.01f, vals[1]));
             maxSpeed = max(0.1f, min(10.0f, vals[2]));
             Serial.printf("[Config] r=%.3f b=%.3f speed=%.2f\n", vals[0], vals[1], maxSpeed);
-        } else {
+        }
+        else
+        {
             Serial.println("[Config] Invalid format");
         }
         return;
     }
 
-    if (strncmp(cmd, "CMD:", 4) == 0) {
-        const char* action = cmd + 4;
-        if (!autoMode) {
-            if (strcmp(action, "forward") == 0) {
-                manualTargetLeft = maxSpeed;
-                manualTargetRight = maxSpeed;
-            } else if (strcmp(action, "backward") == 0) {
-                manualTargetLeft = -maxSpeed;
-                manualTargetRight = -maxSpeed;
-            } else if (strcmp(action, "left") == 0) {
-                manualTargetLeft = -maxSpeed;
-                manualTargetRight = maxSpeed;
-            } else if (strcmp(action, "right") == 0) {
-                manualTargetLeft = maxSpeed;
-                manualTargetRight = -maxSpeed;
-            } else if (strcmp(action, "stop") == 0) {
-                // Emergency stop – always works
-                autoMode = false;
-                pathActive = false;
-                manualTargetLeft = 0.0;
-                manualTargetRight = 0.0;
-                smoother.setTarget(0.0, 0.0);
-                setWheelSpeeds(0.0, 0.0);
-                Serial.println("[CMD] Emergency stop (auto disabled)");
-            } else {
+    if (strncmp(cmd, "CMD:", 4) == 0)
+    {
+        const char *action = cmd + 4;
+        // Emergency stop always works and clears everything
+        if (strcmp(action, "stop") == 0)
+        {
+            autoMode = false;
+            pathActive = false;
+            movingForward = movingBackward = turningLeft = turningRight = false;
+            smoother.setTarget(0.0, 0.0);
+            setWheelSpeeds(0.0, 0.0);
+            Serial.println("[CMD] Emergency stop (auto disabled)");
+            return;
+        }
+        // Manual commands only accepted when NOT in auto mode
+        if (!autoMode)
+        {
+            if (strcmp(action, "forward") == 0)
+            {
+                movingForward = true;
+                movingBackward = false;
+            }
+            else if (strcmp(action, "backward") == 0)
+            {
+                movingBackward = true;
+                movingForward = false;
+            }
+            else if (strcmp(action, "left") == 0)
+            {
+                turningLeft = true;
+                turningRight = false;
+            }
+            else if (strcmp(action, "right") == 0)
+            {
+                turningRight = true;
+                turningLeft = false;
+            }
+            else
+            {
                 Serial.println("[CMD] Unknown");
             }
-        } else {
-            // Auto mode – only stop allowed
-            if (strcmp(action, "stop") == 0) {
-                autoMode = false;
-                pathActive = false;
-                manualTargetLeft = 0.0;
-                manualTargetRight = 0.0;
-                smoother.setTarget(0.0, 0.0);
-                setWheelSpeeds(0.0, 0.0);
-                Serial.println("[CMD] Emergency stop (auto disabled)");
-            } else {
-                Serial.println("[CMD] Ignored (auto mode)");
+
+            if (strcmp(action, "release_forward") == 0)
+            {
+                movingForward = false;
             }
+            else if (strcmp(action, "release_backward") == 0)
+            {
+                movingBackward = false;
+            }
+            else if (strcmp(action, "release_left") == 0)
+            {
+                turningLeft = false;
+            }
+            else if (strcmp(action, "release_right") == 0)
+            {
+                turningRight = false;
+            }
+        }
+        else
+        {
+            Serial.println("[CMD] Ignored (auto mode)");
         }
         return;
     }
 
-    if (strcmp(cmd, "help") == 0) {
+    if (strcmp(cmd, "help") == 0)
+    {
         Serial.println("Commands: MODE:auto/manual/idle, PATH:x,y;..., CONFIG:r,b,speed,width,stop, CMD:forward/backward/left/right/stop");
         return;
     }
-    if (strcmp(cmd, "reset") == 0) {
+    if (strcmp(cmd, "reset") == 0)
+    {
         odom.reset();
         smoother.reset();
         Serial.println("Odometry reset");
@@ -295,9 +383,11 @@ unsigned long lastControlUpdate = 0;
 const unsigned long CONTROL_UPDATE_INTERVAL = 32;
 float lastTime = 0.0;
 
-void setup() {
-    int motorPins[] = { RPWM_RIGHT, LPWM_RIGHT, RPWM_LEFT, LPWM_LEFT };
-    for (int i = 0; i < 4; i++) {
+void setup()
+{
+    int motorPins[] = {RPWM_RIGHT, LPWM_RIGHT, RPWM_LEFT, LPWM_LEFT};
+    for (int i = 0; i < 4; i++)
+    {
         pinMode(motorPins[i], OUTPUT);
         digitalWrite(motorPins[i], LOW);
     }
@@ -312,22 +402,31 @@ void setup() {
     Serial.println("Ready.");
 }
 
-void loop() {
+void loop()
+{
     unsigned long now = millis();
 
     // ---- Serial commands ----
-    while (Serial.available()) {
+    while (Serial.available())
+    {
         char c = Serial.read();
-        if (c == '\n') {
-            if (cmdIndex > 0) {
+        if (c == '\n')
+        {
+            if (cmdIndex > 0)
+            {
                 cmdBuffer[cmdIndex] = '\0';
                 processCommand(cmdBuffer);
                 cmdIndex = 0;
             }
-        } else if (c != '\r') {
-            if (cmdIndex < CMD_BUFFER_SIZE - 1) {
+        }
+        else if (c != '\r')
+        {
+            if (cmdIndex < CMD_BUFFER_SIZE - 1)
+            {
                 cmdBuffer[cmdIndex++] = c;
-            } else {
+            }
+            else
+            {
                 cmdIndex = 0;
                 Serial.println("Command too long");
             }
@@ -338,7 +437,8 @@ void loop() {
     updateWheelAngles();
 
     // ---- Control loop ----
-    if (now - lastControlUpdate >= CONTROL_UPDATE_INTERVAL) {
+    if (now - lastControlUpdate >= CONTROL_UPDATE_INTERVAL)
+    {
         lastControlUpdate = now;
         float currentTime = now / 1000.0;
         float dt = currentTime - lastTime;
@@ -346,55 +446,87 @@ void loop() {
 
         float targetLeft = 0.0, targetRight = 0.0;
 
-        if (autoMode && pathActive && pathIndex < numWaypoints) {
-            double tx = pathPoints[pathIndex].x;
-            double ty = pathPoints[pathIndex].y;
-            double dxp = tx - odom.getX();
-            double dyp = ty - odom.getY();
-            double dist = sqrt(dxp*dxp + dyp*dyp);
-            double desired = atan2(dyp, dxp);
-            double diff = desired - odom.getTheta();
-            while (diff > M_PI) diff -= 2*M_PI;
-            while (diff < -M_PI) diff += 2*M_PI;
+        if (autoMode)
+        {
+            // Auto navigation
+            if (pathActive && pathIndex < numWaypoints)
+            {
+                double tx = pathPoints[pathIndex].x;
+                double ty = pathPoints[pathIndex].y;
+                double dxp = tx - odom.getX();
+                double dyp = ty - odom.getY();
+                double dist = sqrt(dxp * dxp + dyp * dyp);
+                double desired = atan2(dyp, dxp);
+                double diff = desired - odom.getTheta();
+                while (diff > M_PI)
+                    diff -= 2 * M_PI;
+                while (diff < -M_PI)
+                    diff += 2 * M_PI;
 
-            const double turnThresh = 0.15;
-            const double turnSpeed = maxSpeed * 0.35;
-            bool isLast = (pathIndex == numWaypoints - 1);
-            const double stopThreshold = 0.12;
+                const double turnThresh = 0.15;
+                const double turnSpeed = maxSpeed * 0.35;
+                bool isLast = (pathIndex == numWaypoints - 1);
+                const double stopThreshold = 0.12;
 
-            if (dist < stopThreshold) {
-                if (isLast) {
-                    Serial.println("[Path] Final goal reached");
-                    pathActive = false;
-                    targetLeft = targetRight = 0.0;
-                } else {
-                    pathIndex++;
-                    Serial.printf("[Path] Waypoint %d/%d\n", pathIndex+1, numWaypoints);
-                    targetLeft = targetRight = 0.0;
-                }
-            } else if (fabs(diff) > turnThresh) {
-                if (diff > 0) {
-                    targetLeft = turnSpeed * 0.05f;
-                    targetRight = turnSpeed;
-                } else {
-                    targetLeft = turnSpeed;
-                    targetRight = turnSpeed * 0.05f;
-                }
-            } else {
-                double speed = maxSpeed * 0.9;
-                if (isLast) {
-                    double brakingZone = 1.2;
-                    if (dist < brakingZone) {
-                        speed *= (dist / brakingZone);
-                        if (speed < 0.08) speed = 0.08;
+                if (dist < stopThreshold)
+                {
+                    if (isLast)
+                    {
+                        Serial.println("[Path] Final goal reached");
+                        pathActive = false;
+                        targetLeft = targetRight = 0.0;
+                    }
+                    else
+                    {
+                        pathIndex++;
+                        Serial.printf("[Path] Waypoint %d/%d\n", pathIndex + 1, numWaypoints);
+                        targetLeft = targetRight = 0.0;
                     }
                 }
-                targetLeft = speed;
-                targetRight = speed;
+                else if (fabs(diff) > turnThresh)
+                {
+                    if (diff > 0)
+                    {
+                        targetLeft = turnSpeed * 0.05f;
+                        targetRight = turnSpeed;
+                    }
+                    else
+                    {
+                        targetLeft = turnSpeed;
+                        targetRight = turnSpeed * 0.05f;
+                    }
+                }
+                else
+                {
+                    double speed = maxSpeed * 0.9;
+                    if (isLast)
+                    {
+                        double brakingZone = 1.2;
+                        if (dist < brakingZone)
+                        {
+                            speed *= (dist / brakingZone);
+                            if (speed < 0.08)
+                                speed = 0.08;
+                        }
+                    }
+                    targetLeft = speed;
+                    targetRight = speed;
+                }
             }
-        } else {
-            targetLeft = manualTargetLeft;
-            targetRight = manualTargetRight;
+            else
+            {
+                // Auto mode but no active path -> stay stopped
+                targetLeft = 0.0;
+                targetRight = 0.0;
+            }
+        }
+        else
+        {
+            // Manual mode: compute wheel speeds from direction flags
+            float linear = (movingForward - movingBackward) * maxSpeed;
+            float angular = (turningRight - turningLeft) * maxSpeed;
+            targetLeft = linear + angular;
+            targetRight = linear - angular;
         }
 
         smoother.setTarget(targetLeft, targetRight);
@@ -403,15 +535,15 @@ void loop() {
     }
 
     // ---- Odometry and ODOM ----
-    if (now - lastOdomUpdate >= ODOM_UPDATE_INTERVAL) {
+    if (now - lastOdomUpdate >= ODOM_UPDATE_INTERVAL)
+    {
         lastOdomUpdate = now;
         double currentTime = now / 1000.0;
         odom.update(leftWheelAngle, rightWheelAngle, currentTime);
 
-        // Send ODOM without mode flag
         Serial.printf("ODOM,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
-            odom.getX(), odom.getY(), odom.getTheta(),
-            smoother.getLeftSpeed(), smoother.getRightSpeed(),
-            odom.getLinearVel(), odom.getAngularVel());
+                      odom.getX(), odom.getY(), odom.getTheta(),
+                      smoother.getLeftSpeed(), smoother.getRightSpeed(),
+                      odom.getLinearVel(), odom.getAngularVel());
     }
 }
