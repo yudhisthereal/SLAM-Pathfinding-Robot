@@ -108,13 +108,12 @@ class VelocitySmoother
 private:
     double targetLeft = 0.0, targetRight = 0.0;
     double currentLeft = 0.0, currentRight = 0.0;
-    double forwardSmooth;   // factor for target > 0 (forward)
-    double backwardSmooth;  // factor for target <= 0 (stop/backward)
+    double accelFactor;   // factor when |target| > |current|  (0.05)
+    double decelFactor;   // factor when |target| <= |current| (0.15)
 
 public:
-    // Constructor with independent smoothing factors
-    VelocitySmoother(double forwardFactor = 0.05, double backwardFactor = 0.1)
-        : forwardSmooth(forwardFactor), backwardSmooth(backwardFactor) {}
+    VelocitySmoother(double accel = 0.05, double decel = 0.15)
+        : accelFactor(accel), decelFactor(decel) {}
 
     void setTarget(double left, double right)
     {
@@ -124,14 +123,18 @@ public:
 
     void update(double dt)
     {
-        if (dt > 0.1) dt = 0.032;   // safety clamp for large dt
+        if (dt > 0.1) dt = 0.032;   // clamp large dt
 
-        // Left wheel: choose factor based on target direction
-        double factorL = (targetLeft > 0) ? forwardSmooth : backwardSmooth;
+        // Left wheel
+        double absTargetL = fabs(targetLeft);
+        double absCurrentL = fabs(currentLeft);
+        double factorL = (absTargetL > absCurrentL) ? accelFactor : decelFactor;
         currentLeft += (targetLeft - currentLeft) * factorL;
 
-        // Right wheel: same logic
-        double factorR = (targetRight > 0) ? forwardSmooth : backwardSmooth;
+        // Right wheel
+        double absTargetR = fabs(targetRight);
+        double absCurrentR = fabs(currentRight);
+        double factorR = (absTargetR > absCurrentR) ? accelFactor : decelFactor;
         currentRight += (targetRight - currentRight) * factorR;
 
         // Snap to zero when very small
