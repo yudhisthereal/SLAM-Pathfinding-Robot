@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include "thijs_rplidar.h"
 
 // ----- Motor pins -----
 const int RPWM_RIGHT = 2;
@@ -7,19 +6,19 @@ const int LPWM_RIGHT = 4;
 const int RPWM_LEFT  = 18;
 const int LPWM_LEFT  = 19;
 
-// ----- LIDAR -----
-const int LIDAR_RX   = 32;
-const int LIDAR_TX   = 33;
-const int CTRL_MOTO  = 26;
-
 // ----- IR sensors -----
 const int RIGHT_IR = 34;
 const int LEFT_IR  = 35;
 
-RPlidar lidar(Serial2);
+// ============================================================
+// Constants for motor control
+// ============================================================
+const float DEFAULT_MAX_SPEED = 4.0;    // rad/s
+float maxSpeed = DEFAULT_MAX_SPEED;     // can be changed via CONFIG
+const float PWM_PER_RAD_S = 255.0 / DEFAULT_MAX_SPEED;  // fixed mapping
 
 // ============================================================
-// IR Wheel Angle Estimation (unchanged)
+// IR Wheel Angle Estimation
 // ============================================================
 const float TRANSITIONS_PER_REV = 7.0;
 const float RAD_PER_TRANSITION = 2.0 * PI / TRANSITIONS_PER_REV;
@@ -46,12 +45,12 @@ void updateWheelAngles() {
 }
 
 // ============================================================
-// NEW: Odometry Class (no STL dependencies)
+// Odometry Class
 // ============================================================
 class Odometry {
 private:
-    double wheelRadius = 0.0975;   // meters
-    double wheelBase = 0.33;       // meters (track width)
+    double wheelRadius = 0.0975;
+    double wheelBase = 0.33;
     double prevLeftPos = 0;
     double prevRightPos = 0;
     double prevTime = 0;
@@ -60,7 +59,7 @@ private:
     bool firstUpdate = true;
 
 public:
-    void setWheelRadius(double r) { wheelRadius = max(0.01, r); }   // uses Arduino macro
+    void setWheelRadius(double r) { wheelRadius = max(0.01, r); }
     void setWheelBase(double b)   { wheelBase = max(0.01, b); }
 
     void update(double leftPos, double rightPos, double currentTime) {
@@ -82,7 +81,6 @@ public:
         theta += deltaTheta;
         x += distance * cos(theta);
         y += distance * sin(theta);
-        // Normalize theta to [-PI, PI]
         while (theta > M_PI) theta -= 2 * M_PI;
         while (theta < -M_PI) theta += 2 * M_PI;
         prevLeftPos = leftPos;
@@ -110,49 +108,263 @@ public:
     double getAngularVel() const { return angularVel; }
 };
 
-// ============================================================
-// Odometry instance and timing
-// ============================================================
 Odometry odom;
-unsigned long lastOdomUpdate = 0;
-const unsigned long ODOM_UPDATE_INTERVAL = 50;   // ms (approx 20 Hz)
 
 // ============================================================
-// Rest of original code (lidar, motor sweep, etc.)
+// VelocitySmoother Class
 // ============================================================
+class VelocitySmoother {
+private:
+    double targetLeftSpeed = 0.0;
+    double targetRightSpeed = 0.0;
+    double currentLeftSpeed = 0.0;
+    double currentRightSpeed = 0.0;
+    double smoothingFactor = 0.15;
 
-// Lidar motor control
-void setLidarMotor(uint8_t speed) {
-    analogWrite(CTRL_MOTO, speed);
-}
+public:
+    VelocitySmoother(double factor = 0.15) : smoothingFactor(factor) {}
 
-// LiDAR callback (unchanged)
-unsigned long lastPrintTime = 0;
-const unsigned long PRINT_INTERVAL = 200;
-void lidarDataCallback(RPlidar* self, uint16_t dist, uint16_t angle_q6, uint8_t newRotFlag, int8_t quality) {
-    if (dist == 0) return;
-    unsigned long now = millis();
-    if (now - lastPrintTime >= PRINT_INTERVAL) {
-        lastPrintTime = now;
-        float angle_deg = angle_q6 / 64.0;
-        // Serial.print(angle_deg, 2); Serial.print(","); Serial.println(dist);
+    void setTarget(double left, double right) {
+        targetLeftSpeed = left;
+        targetRightSpeed = right;
+    }
+
+    void update(double dt) {
+        if (dt > 0.1) dt = 0.032;
+        currentLeftSpeed += (targetLeftSpeed - currentLeftSpeed) * smoothingFactor;
+        currentRightSpeed += (targetRightSpeed - currentRightSpeed) * smoothingFactor;
+        if (fabs(currentLeftSpeed) < 0.005) currentLeftSpeed = 0.0;
+        if (fabs(currentRightSpeed) < 0.005) currentRightSpeed = 0.0;
+    }
+
+    double getLeftSpeed() const { return currentLeftSpeed; }
+    double getRightSpeed() const { return currentRightSpeed; }
+
+    void setSmoothingFactor(double f) {
+        smoothingFactor = max(0.05, min(0.5, f));
+    }
+
+    bool isMoving() const {
+        return (fabs(currentLeftSpeed) > 0.01 || fabs(currentRightSpeed) > 0.01);
+    }
+
+    void reset() {
+        targetLeftSpeed = targetRightSpeed = 0.0;
+        currentLeftSpeed = currentRightSpeed = 0.0;
+    }
+};
+
+VelocitySmoother smoother(0.15);
+
+// ============================================================
+// Motor driver functions
+// ============================================================
+void setMotorPWM(int rpwm, int lpwm, int speed) {
+    if (speed >= 0) {
+        analogWrite(rpwm, speed);
+        analogWrite(lpwm, 0);
+    } else {
+        analogWrite(rpwm, 0);
+        analogWrite(lpwm, -speed);
     }
 }
 
-// Motor sweep (unchanged)
-enum MotorState {
-  SWEEP_RIGHT_FWD_LEFT_BACK,
-  SWEEP_RIGHT_BACK_LEFT_FWD
-};
-MotorState state = SWEEP_RIGHT_FWD_LEFT_BACK;
-int speedValue = 0;
-int speedDirection = 1;
-unsigned long lastSpeedUpdate = 0;
-const unsigned long SPEED_UPDATE_INTERVAL = 50;
+void setWheelSpeeds(float leftRadPerSec, float rightRadPerSec) {
+    leftRadPerSec  = constrain(leftRadPerSec,  -maxSpeed, maxSpeed);
+    rightRadPerSec = constrain(rightRadPerSec, -maxSpeed, maxSpeed);
+    int leftPWM  = (int)round(leftRadPerSec  * PWM_PER_RAD_S);
+    int rightPWM = (int)round(rightRadPerSec * PWM_PER_RAD_S);
+    leftPWM  = constrain(leftPWM,  -255, 255);
+    rightPWM = constrain(rightPWM, -255, 255);
+    setMotorPWM(RPWM_LEFT, LPWM_LEFT, leftPWM);
+    setMotorPWM(RPWM_RIGHT, LPWM_RIGHT, rightPWM);
+}
 
-// IR state print tracking (original)
-int lastLeftState  = -1;
-int lastRightState = -1;
+// ============================================================
+// Target speeds (manual commands)
+// ============================================================
+float manualTargetLeft = 0.0;
+float manualTargetRight = 0.0;
+
+// ============================================================
+// Auto‑navigation state
+// ============================================================
+bool autoMode = false;
+bool pathActive = false;
+unsigned int pathIndex = 0;
+
+#define MAX_WAYPOINTS 50
+struct Waypoint { double x, y; };
+Waypoint pathPoints[MAX_WAYPOINTS];
+unsigned int numWaypoints = 0;
+
+float robotWidth = 0.41;
+float obstacleDistThres = 0.3;
+bool obstacleAhead = false;
+
+// ============================================================
+// FULL command parser (matches Webots protocol)
+// ============================================================
+#define CMD_BUFFER_SIZE 256
+char cmdBuffer[CMD_BUFFER_SIZE];
+int cmdIndex = 0;
+
+void processCommand(const char* cmd) {
+    if (strlen(cmd) == 0) return;
+
+    // Make a mutable copy for strtok
+    char cmdCopy[CMD_BUFFER_SIZE];
+    strncpy(cmdCopy, cmd, CMD_BUFFER_SIZE - 1);
+    cmdCopy[CMD_BUFFER_SIZE - 1] = '\0';
+
+    // ---- CMD: messages ----
+    if (strncmp(cmd, "CMD:", 4) == 0) {
+        const char* action = cmd + 4;
+        // Only process manual commands if autoMode is OFF (matches simulation)
+        if (!autoMode) {
+            if (strcmp(action, "forward") == 0) {
+                manualTargetLeft = maxSpeed;
+                manualTargetRight = maxSpeed;
+                Serial.println("[CMD] Forward");
+            } else if (strcmp(action, "backward") == 0) {
+                manualTargetLeft = -maxSpeed;
+                manualTargetRight = -maxSpeed;
+                Serial.println("[CMD] Backward");
+            } else if (strcmp(action, "left") == 0) {
+                manualTargetLeft = -maxSpeed;
+                manualTargetRight = maxSpeed;
+                Serial.println("[CMD] Turn left");
+            } else if (strcmp(action, "right") == 0) {
+                manualTargetLeft = maxSpeed;
+                manualTargetRight = -maxSpeed;
+                Serial.println("[CMD] Turn right");
+            } else if (strcmp(action, "stop") == 0) {
+                manualTargetLeft = 0.0;
+                manualTargetRight = 0.0;
+                Serial.println("[CMD] Stop");
+            } else if (strcmp(action, "auto") == 0) {
+                // Toggle auto mode
+                autoMode = !autoMode;
+                if (autoMode) {
+                    Serial.println("[Auto] Enabled");
+                    pathActive = (numWaypoints > 0);
+                    pathIndex = 0;
+                } else {
+                    Serial.println("[Auto] Disabled");
+                    pathActive = false;
+                    pathIndex = 0;
+                    manualTargetLeft = 0.0;
+                    manualTargetRight = 0.0;
+                    smoother.setTarget(0.0, 0.0);
+                }
+            } else {
+                Serial.println("Unknown CMD");
+            }
+        } else {
+            // autoMode is ON – ignore all manual commands including "auto"? 
+            // (CMD:auto is already handled above when !autoMode; here it's ignored)
+            Serial.println("Ignored – auto mode active");
+        }
+    }
+    // ---- AUTO: messages ----
+    else if (strncmp(cmd, "AUTO:", 5) == 0) {
+        bool newAuto = (cmd[5] == '1');
+        if (newAuto != autoMode) {
+            autoMode = newAuto;
+            if (autoMode) {
+                Serial.println("[Auto] Enabled by bridge");
+                pathActive = (numWaypoints > 0);
+                pathIndex = 0;
+            } else {
+                Serial.println("[Auto] Disabled by bridge");
+                pathActive = false;
+                pathIndex = 0;
+                manualTargetLeft = 0.0;
+                manualTargetRight = 0.0;
+                smoother.setTarget(0.0, 0.0);
+            }
+        }
+    }
+    // ---- CONFIG: messages ----
+    else if (strncmp(cmd, "CONFIG:", 7) == 0) {
+        char buffer[256];
+        strncpy(buffer, cmd + 7, sizeof(buffer) - 1);
+        buffer[sizeof(buffer) - 1] = '\0';
+        char* token = strtok(buffer, ",");
+        int idx = 0;
+        float vals[5];
+        while (token && idx < 5) {
+            vals[idx++] = atof(token);
+            token = strtok(NULL, ",");
+        }
+        if (idx == 5) {
+            odom.setWheelRadius(max(0.01f, vals[0]));
+            odom.setWheelBase(max(0.01f, vals[1]));
+            maxSpeed = max(0.1f, min(10.0f, vals[2]));
+            robotWidth = max(0.01f, vals[3]);
+            obstacleDistThres = max(0.01f, vals[4]);
+            Serial.printf("[Config] radius=%.3f base=%.3f maxSpeed=%.2f width=%.3f stopDist=%.3f\n",
+                          vals[0], vals[1], maxSpeed, robotWidth, obstacleDistThres);
+        } else {
+            Serial.println("[Config] Invalid format, need 5 values");
+        }
+    }
+    // ---- PATH: messages ----
+    else if (strncmp(cmd, "PATH:", 5) == 0) {
+        char buffer[256];
+        strncpy(buffer, cmd + 5, sizeof(buffer) - 1);
+        buffer[sizeof(buffer) - 1] = '\0';
+        numWaypoints = 0;
+        char* pair = strtok(buffer, ";");
+        while (pair && numWaypoints < MAX_WAYPOINTS) {
+            char* comma = strchr(pair, ',');
+            if (comma) {
+                *comma = '\0';
+                double x = atof(pair);
+                double y = atof(comma + 1);
+                pathPoints[numWaypoints].x = x;
+                pathPoints[numWaypoints].y = y;
+                numWaypoints++;
+            }
+            pair = strtok(NULL, ";");
+        }
+        if (numWaypoints > 0) {
+            pathActive = true;
+            pathIndex = 0;
+            Serial.printf("[Path] Received %d waypoints\n", numWaypoints);
+        } else {
+            pathActive = false;
+            Serial.println("[Path] No valid waypoints");
+        }
+    }
+    // ---- Local debug commands ----
+    else if (strcmp(cmd, "help") == 0) {
+        Serial.println("Commands (simulation protocol):");
+        Serial.println("  CMD:forward/backward/left/right/stop/auto");
+        Serial.println("  AUTO:1  or  AUTO:0");
+        Serial.println("  CONFIG:radius,base,maxSpeed,width,stopDist");
+        Serial.println("  PATH:x1,y1;x2,y2;...");
+        Serial.println("Extra local: reset  (reset odometry)");
+    } else if (strcmp(cmd, "reset") == 0) {
+        odom.reset();
+        smoother.reset();
+        Serial.println("Odometry reset.");
+    } else {
+        Serial.println("Unknown command. Type 'help'.");
+    }
+}
+
+// ============================================================
+// Timing variables
+// ============================================================
+unsigned long lastOdomUpdate = 0;
+const unsigned long ODOM_UPDATE_INTERVAL = 50;
+unsigned long lastControlUpdate = 0;
+const unsigned long CONTROL_UPDATE_INTERVAL = 32;
+unsigned long lastObstacleCheck = 0;
+const unsigned long OBSTACLE_CHECK_INTERVAL = 100;
+
+float lastTime = 0.0;
 
 // ============================================================
 // setup()
@@ -164,109 +376,144 @@ void setup() {
         pinMode(motorPins[i], OUTPUT);
         digitalWrite(motorPins[i], LOW);
     }
-    pinMode(CTRL_MOTO, OUTPUT);
-    setLidarMotor(0);
 
     Serial.begin(115200);
-    lidar.init(LIDAR_RX, LIDAR_TX);
-    lidar.postParseCallback = lidarDataCallback;
 
     delay(1000);
-    Serial.println("=== Step 2: Odometry added ===");
-
-    if (!lidar.connectionCheck()) {
-        Serial.println("connectionCheck() failed!");
-        while(1) delay(100);
-    }
-    Serial.println("LIDAR connected.");
-
-    if (!lidar.startExpressScan(EXPRESS_SCAN_WORKING_MODE_BOOST)) {
-        Serial.println("Failed to start scan.");
-        while(1) delay(100);
-    }
-    Serial.println("Scan started.");
-    setLidarMotor(255);
+    Serial.println("=== Robot Control - No LiDAR ===");
 
     pinMode(RIGHT_IR, INPUT);
     pinMode(LEFT_IR, INPUT);
 
-    // Initialise IR states
     lastLeftIRState = (analogRead(LEFT_IR) < IR_THRESHOLD) ? 0 : 1;
     lastRightIRState = (analogRead(RIGHT_IR) < IR_THRESHOLD) ? 0 : 1;
 
-    Serial.println("Ready. Odometry pose printed every 2 seconds.");
+    lastTime = millis() / 1000.0;
+    Serial.println("Ready. Type 'help' for commands.");
 }
 
 // ============================================================
 // loop()
 // ============================================================
 void loop() {
-    // 1. LiDAR processing
-    int8_t result = lidar.handleData(false, false);
-    if (result < 0) {
-        Serial.println("LIDAR error - stopping.");
-        setLidarMotor(0);
-        while(1) delay(100);
-    }
-
-    // 2. Motor sweep (original)
     unsigned long now = millis();
-    if (now - lastSpeedUpdate >= SPEED_UPDATE_INTERVAL) {
-        lastSpeedUpdate = now;
-        speedValue += speedDirection;
-        if (speedValue >= 255) {
-            speedValue = 255;
-            speedDirection = -1;
-        } else if (speedValue <= 0) {
-            speedValue = 0;
-            speedDirection = 1;
-            state = (state == SWEEP_RIGHT_FWD_LEFT_BACK)
-                      ? SWEEP_RIGHT_BACK_LEFT_FWD
-                      : SWEEP_RIGHT_FWD_LEFT_BACK;
-        }
-        switch (state) {
-            case SWEEP_RIGHT_FWD_LEFT_BACK:
-                analogWrite(RPWM_RIGHT, speedValue);
-                analogWrite(LPWM_RIGHT, 0);
-                analogWrite(RPWM_LEFT, 0);
-                analogWrite(LPWM_LEFT, speedValue);
-                break;
-            case SWEEP_RIGHT_BACK_LEFT_FWD:
-                analogWrite(RPWM_RIGHT, 0);
-                analogWrite(LPWM_RIGHT, speedValue);
-                analogWrite(RPWM_LEFT, speedValue);
-                analogWrite(LPWM_LEFT, 0);
-                break;
+
+    // ---- 1. Process serial commands ----
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '\n') {
+            if (cmdIndex > 0) {
+                cmdBuffer[cmdIndex] = '\0';
+                processCommand(cmdBuffer);
+                cmdIndex = 0;
+            }
+        } else if (c != '\r') {
+            if (cmdIndex < CMD_BUFFER_SIZE - 1) {
+                cmdBuffer[cmdIndex++] = c;
+            } else {
+                cmdIndex = 0;
+                Serial.println("Command too long, ignored.");
+            }
         }
     }
 
-    // 3. Update wheel angles from IR (every loop)
+    // ---- 2. Update wheel angles ----
     updateWheelAngles();
 
-    // 4. Update odometry at fixed interval
+    // ---- 3. Obstacle detection simulation (no LiDAR) ----
+    if (now - lastObstacleCheck >= OBSTACLE_CHECK_INTERVAL) {
+        lastObstacleCheck = now;
+        // For demo purposes, obstacle detection is disabled
+        // Could be replaced with ultrasonic or other sensors
+        obstacleAhead = false;
+    }
+
+    // ---- 4. Control loop (navigation + motor commands) ----
+    if (now - lastControlUpdate >= CONTROL_UPDATE_INTERVAL) {
+        lastControlUpdate = now;
+        float currentTime = now / 1000.0;
+        float dt = currentTime - lastTime;
+        lastTime = currentTime;
+
+        float targetLeft = 0.0, targetRight = 0.0;
+
+        if (obstacleAhead) {
+            // Obstacle detected – stop
+            targetLeft = 0.0;
+            targetRight = 0.0;
+        } else if (autoMode && pathActive && pathIndex < numWaypoints) {
+            // ---- Autonomous navigation ----
+            double tx = pathPoints[pathIndex].x;
+            double ty = pathPoints[pathIndex].y;
+            double dxp = tx - odom.getX();
+            double dyp = ty - odom.getY();
+            double dist = sqrt(dxp*dxp + dyp*dyp);
+            double desired_heading = atan2(dyp, dxp);
+            double diff = desired_heading - odom.getTheta();
+            while (diff > M_PI) diff -= 2*M_PI;
+            while (diff < -M_PI) diff += 2*M_PI;
+
+            const double turnThresh = 0.15;
+            const double turnSpeed = maxSpeed * 0.35;
+            bool isLastWaypoint = (pathIndex == numWaypoints - 1);
+            const double stopThreshold = 0.12;
+
+            if (dist < stopThreshold) {
+                if (isLastWaypoint) {
+                    Serial.println("[Path] Final goal reached! Stopping.");
+                    pathActive = false;
+                    pathIndex = 0;
+                    targetLeft = 0.0;
+                    targetRight = 0.0;
+                } else {
+                    pathIndex++;
+                    Serial.printf("[Path] Reached waypoint %d/%d\n", pathIndex, numWaypoints);
+                    targetLeft = 0.0;
+                    targetRight = 0.0;
+                }
+            } else if (fabs(diff) > turnThresh) {
+                if (diff > 0) {
+                    targetLeft = turnSpeed * 0.05f;
+                    targetRight = turnSpeed;
+                } else {
+                    targetLeft = turnSpeed;
+                    targetRight = turnSpeed * 0.05f;
+                }
+            } else {
+                double speed = maxSpeed * 0.9;
+                if (isLastWaypoint) {
+                    double brakingZone = 1.2;
+                    if (dist < brakingZone) {
+                        speed = speed * (dist / brakingZone);
+                        if (speed < 0.08) speed = 0.08;
+                    }
+                }
+                targetLeft = speed;
+                targetRight = speed;
+            }
+        } else {
+            // Manual mode
+            targetLeft = manualTargetLeft;
+            targetRight = manualTargetRight;
+        }
+
+        // Apply to smoother
+        smoother.setTarget(targetLeft, targetRight);
+        smoother.update(dt);
+        setWheelSpeeds(smoother.getLeftSpeed(), smoother.getRightSpeed());
+    }
+
+    // ---- 5. Update odometry ----
     if (now - lastOdomUpdate >= ODOM_UPDATE_INTERVAL) {
         lastOdomUpdate = now;
         double currentTime = now / 1000.0;
         odom.update(leftWheelAngle, rightWheelAngle, currentTime);
     }
 
-    // 5. Print pose every 2 seconds (for verification)
+    // ---- 6. Print pose every 2 seconds ----
     static unsigned long lastPosePrint = 0;
     if (now - lastPosePrint >= 2000) {
         lastPosePrint = now;
         odom.printPose();
-    }
-
-    // 6. (Optional) Print IR state changes (original)
-    int leftReading = analogRead(LEFT_IR);
-    int rightReading = analogRead(RIGHT_IR);
-    int leftState  = (leftReading  < IR_THRESHOLD) ? 0 : 1;
-    int rightState = (rightReading < IR_THRESHOLD) ? 0 : 1;
-    if (leftState != lastLeftState || rightState != lastRightState) {
-        lastLeftState = leftState;
-        lastRightState = rightState;
-        Serial.printf("IR L:%d (state %d) R:%d (state %d) | L_ang=%.3f R_ang=%.3f\n",
-                      leftReading, leftState, rightReading, rightState,
-                      leftWheelAngle, rightWheelAngle);
     }
 }
