@@ -108,27 +108,38 @@ class VelocitySmoother
 private:
     double targetLeft = 0.0, targetRight = 0.0;
     double currentLeft = 0.0, currentRight = 0.0;
-    double smoothingFactor = 0.15;
+    double forwardSmooth;   // factor for target > 0 (forward)
+    double backwardSmooth;  // factor for target <= 0 (stop/backward)
 
 public:
-    VelocitySmoother(double factor = 0.15) : smoothingFactor(factor) {}
+    // Constructor with independent smoothing factors
+    VelocitySmoother(double forwardFactor = 0.05, double backwardFactor = 0.1)
+        : forwardSmooth(forwardFactor), backwardSmooth(backwardFactor) {}
+
     void setTarget(double left, double right)
     {
         targetLeft = left;
         targetRight = right;
     }
+
     void update(double dt)
     {
-        if (dt > 0.1)
-            dt = 0.032;
-        currentLeft += (targetLeft - currentLeft) * smoothingFactor;
-        currentRight += (targetRight - currentRight) * smoothingFactor;
-        if (fabs(currentLeft) < 0.005)
-            currentLeft = 0.0;
-        if (fabs(currentRight) < 0.005)
-            currentRight = 0.0;
+        if (dt > 0.1) dt = 0.032;   // safety clamp for large dt
+
+        // Left wheel: choose factor based on target direction
+        double factorL = (targetLeft > 0) ? forwardSmooth : backwardSmooth;
+        currentLeft += (targetLeft - currentLeft) * factorL;
+
+        // Right wheel: same logic
+        double factorR = (targetRight > 0) ? forwardSmooth : backwardSmooth;
+        currentRight += (targetRight - currentRight) * factorR;
+
+        // Snap to zero when very small
+        if (fabs(currentLeft) < 0.005)  currentLeft = 0.0;
+        if (fabs(currentRight) < 0.005) currentRight = 0.0;
     }
-    double getLeftSpeed() const { return currentLeft; }
+
+    double getLeftSpeed()  const { return currentLeft; }
     double getRightSpeed() const { return currentRight; }
     void reset() { targetLeft = targetRight = currentLeft = currentRight = 0.0; }
 };
