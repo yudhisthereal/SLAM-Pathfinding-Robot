@@ -23,8 +23,13 @@ const float PWM_PER_RAD_S = 255.0 / DEFAULT_MAX_SPEED;
 const float TRANSITIONS_PER_REV = 13.0;
 const float RAD_PER_TRANSITION = 2.0 * PI / TRANSITIONS_PER_REV;
 
+const float DIRECTION_DEADBAND = 0.05f;
+
 float leftWheelAngle = 0.0, rightWheelAngle = 0.0;
 int lastLeftIRState = -1, lastRightIRState = -1;
+
+int leftDirection = 0;
+int rightDirection = 0;
 
 // ---- Movement direction flags (manual mode) ----
 bool movingForward = false;
@@ -146,7 +151,6 @@ VelocitySmoother smoother;
 
 // ---------------------------------------------------------------------
 //  Wheel angle update from IR sensors (odometry)
-//  FIXED: Independent thresholds for left and right IR sensors
 // ---------------------------------------------------------------------
 void updateWheelAngles()
 {
@@ -157,11 +161,15 @@ void updateWheelAngles()
     int leftState = (leftReading < LEFT_IR_THRESHOLD) ? 0 : 1;
     int rightState = (rightReading < RIGHT_IR_THRESHOLD) ? 0 : 1;
     
-    // Detect HIGH to LOW transitions for both sensors
-    if (lastLeftIRState == 1 && leftState == 0)
-        leftWheelAngle += RAD_PER_TRANSITION;
-    if (lastRightIRState == 1 && rightState == 0)
-        rightWheelAngle += RAD_PER_TRANSITION;
+    // Explicit transition detection for easier debugging
+    bool leftTransition = (lastLeftIRState == 1 && leftState == 0);
+    bool rightTransition = (lastRightIRState == 1 && rightState == 0);
+    
+    // Apply direction-aware updates (direction preserved through deadband)
+    if (leftTransition)
+        leftWheelAngle += leftDirection * RAD_PER_TRANSITION;
+    if (rightTransition)
+        rightWheelAngle += rightDirection * RAD_PER_TRANSITION;
     
     lastLeftIRState = leftState;
     lastRightIRState = rightState;
@@ -186,6 +194,21 @@ void setWheelSpeeds(float leftRadPerSec, float rightRadPerSec)
 {
     leftRadPerSec = constrain(leftRadPerSec, -maxSpeed, maxSpeed);
     rightRadPerSec = constrain(rightRadPerSec, -maxSpeed, maxSpeed);
+    
+    // Update direction variables based on commanded velocity
+    // Preserve previous direction through deadband to avoid losing pulses during reversals
+    if (leftRadPerSec > DIRECTION_DEADBAND)
+        leftDirection = 1;
+    else if (leftRadPerSec < -DIRECTION_DEADBAND)
+        leftDirection = -1;
+    // otherwise leave it unchanged - preserves last known direction
+    
+    if (rightRadPerSec > DIRECTION_DEADBAND)
+        rightDirection = 1;
+    else if (rightRadPerSec < -DIRECTION_DEADBAND)
+        rightDirection = -1;
+    // otherwise leave it unchanged - preserves last known direction
+    
     int leftPWM = (int)round(leftRadPerSec * PWM_PER_RAD_S);
     int rightPWM = (int)round(rightRadPerSec * PWM_PER_RAD_S);
     leftPWM = constrain(leftPWM, -255, 255);
