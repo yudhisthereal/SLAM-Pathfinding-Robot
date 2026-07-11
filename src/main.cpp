@@ -10,13 +10,18 @@ const int LPWM_LEFT = 33;
 const int RIGHT_IR = 4;
 const int LEFT_IR = 2;
 
+// Independent IR thresholds
+// Left IR: reads ~1900 when HIGH, ~50 when LOW
+// Right IR: reads ~4095 when HIGH, ~50 when LOW
+const int LEFT_IR_THRESHOLD = 1000;   // Midpoint between 1900 and 50
+const int RIGHT_IR_THRESHOLD = 2048;  // Midpoint between 4095 and 50
+
 const float DEFAULT_MAX_SPEED = 4.0;
 float maxSpeed = DEFAULT_MAX_SPEED;
 const float PWM_PER_RAD_S = 255.0 / DEFAULT_MAX_SPEED;
 
 const float TRANSITIONS_PER_REV = 13.0;
 const float RAD_PER_TRANSITION = 2.0 * PI / TRANSITIONS_PER_REV;
-const int IR_THRESHOLD = 2048;
 
 float leftWheelAngle = 0.0, rightWheelAngle = 0.0;
 int lastLeftIRState = -1, lastRightIRState = -1;
@@ -27,19 +32,9 @@ bool movingBackward = false;
 bool turningLeft = false;
 bool turningRight = false;
 
-void updateWheelAngles()
-{
-    int leftReading = analogRead(LEFT_IR);
-    int rightReading = analogRead(RIGHT_IR);
-    int leftState = (leftReading < IR_THRESHOLD) ? 0 : 1;
-    int rightState = (rightReading < IR_THRESHOLD) ? 0 : 1;
-    if (lastLeftIRState == 1 && leftState == 0)
-        leftWheelAngle += RAD_PER_TRANSITION;
-    if (lastRightIRState == 1 && rightState == 0)
-        rightWheelAngle += RAD_PER_TRANSITION;
-    lastLeftIRState = leftState;
-    lastRightIRState = rightState;
-}
+// ---- Obstacle avoidance distances (from bridge) ----
+float frontDist = 2.0f, rearDist = 2.0f, leftDist = 2.0f, rightDist = 2.0f;
+float configStopDistance = 0.3f;   // default, updated from CONFIG
 
 // ---- Odometry ----
 class Odometry
@@ -149,6 +144,29 @@ public:
 
 VelocitySmoother smoother;
 
+// ---------------------------------------------------------------------
+//  Wheel angle update from IR sensors (odometry)
+//  FIXED: Independent thresholds for left and right IR sensors
+// ---------------------------------------------------------------------
+void updateWheelAngles()
+{
+    int leftReading = analogRead(LEFT_IR);
+    int rightReading = analogRead(RIGHT_IR);
+    
+    // Use independent thresholds based on each sensor's characteristics
+    int leftState = (leftReading < LEFT_IR_THRESHOLD) ? 0 : 1;
+    int rightState = (rightReading < RIGHT_IR_THRESHOLD) ? 0 : 1;
+    
+    // Detect HIGH to LOW transitions for both sensors
+    if (lastLeftIRState == 1 && leftState == 0)
+        leftWheelAngle += RAD_PER_TRANSITION;
+    if (lastRightIRState == 1 && rightState == 0)
+        rightWheelAngle += RAD_PER_TRANSITION;
+    
+    lastLeftIRState = leftState;
+    lastRightIRState = rightState;
+}
+
 // ---- Motor driver ----
 void setMotorPWM(int rpwm, int lpwm, int speed)
 {
@@ -190,9 +208,6 @@ Waypoint pathPoints[MAX_WAYPOINTS];
 unsigned int numWaypoints = 0;
 unsigned int pathIndex = 0;
 
-// (unused now, kept for compatibility)
-float manualTargetLeft = 0.0, manualTargetRight = 0.0;
-
 // ---- Command parser ----
 #define CMD_BUFFER_SIZE 256
 char cmdBuffer[CMD_BUFFER_SIZE];
@@ -209,7 +224,6 @@ void processCommand(const char *cmd)
         if (strcmp(mode, "auto") == 0)
         {
             autoMode = true;
-            // clear manual flags when switching to auto
             movingForward = movingBackward = turningLeft = turningRight = false;
             pathActive = pathExists;
             if (pathActive)
@@ -300,7 +314,10 @@ void processCommand(const char *cmd)
             odom.setWheelRadius(max(0.01f, vals[0]));
             odom.setWheelBase(max(0.01f, vals[1]));
             maxSpeed = max(0.1f, min(10.0f, vals[2]));
-            Serial.printf("[Config] r=%.3f b=%.3f speed=%.2f\n", vals[0], vals[1], maxSpeed);
+            // vals[3] is robot_width (not used for avoidance)
+            configStopDistance = max(0.05f, min(2.0f, vals[4]));
+            Serial.printf("[Config] r=%.3f b=%.3f speed=%.2f width=%.3f stop=%.3f\n",
+                          vals[0], vals[1], maxSpeed, vals[3], configStopDistance);
         }
         else
         {
@@ -309,10 +326,23 @@ void processCommand(const char *cmd)
         return;
     }
 
+    // ---- Obstacle distances from bridge ----
+    if (strncmp(cmd, "OBS:", 4) == 0)
+    {
+        char *p = strtok((char*)cmd + 4, ",");
+        if (p) frontDist = constrain(atof(p), 0.0f, 5.0f);
+        p = strtok(NULL, ",");
+        if (p) rearDist  = constrain(atof(p), 0.0f, 5.0f);
+        p = strtok(NULL, ",");
+        if (p) leftDist  = constrain(atof(p), 0.0f, 5.0f);
+        p = strtok(NULL, ",");
+        if (p) rightDist = constrain(atof(p), 0.0f, 5.0f);
+        return;
+    }
+
     if (strncmp(cmd, "CMD:", 4) == 0)
     {
         const char *action = cmd + 4;
-        // Emergency stop always works and clears everything
         if (strcmp(action, "stop") == 0)
         {
             autoMode = false;
@@ -323,7 +353,17 @@ void processCommand(const char *cmd)
             Serial.println("[CMD] Emergency stop (auto disabled)");
             return;
         }
-        // Manual commands only accepted when NOT in auto mode
+        if (strcmp(action, "reset") == 0)
+        {
+            odom.reset();
+            smoother.reset();
+
+            autoMode = false;
+            pathActive = false;
+
+            Serial.println("[CMD] Odometry reset");
+            return;
+        }
         if (!autoMode)
         {
             if (strcmp(action, "forward") == 0)
@@ -346,12 +386,7 @@ void processCommand(const char *cmd)
                 turningRight = true;
                 turningLeft = false;
             }
-            else
-            {
-                Serial.println("[CMD] Unknown");
-            }
-
-            if (strcmp(action, "release_forward") == 0)
+            else if (strcmp(action, "release_forward") == 0)
             {
                 movingForward = false;
             }
@@ -367,6 +402,10 @@ void processCommand(const char *cmd)
             {
                 turningRight = false;
             }
+            else
+            {
+                Serial.println("[CMD] Unknown");
+            }
         }
         else
         {
@@ -377,14 +416,7 @@ void processCommand(const char *cmd)
 
     if (strcmp(cmd, "help") == 0)
     {
-        Serial.println("Commands: MODE:auto/manual/idle, PATH:x,y;..., CONFIG:r,b,speed,width,stop, CMD:forward/backward/left/right/stop");
-        return;
-    }
-    if (strcmp(cmd, "reset") == 0)
-    {
-        odom.reset();
-        smoother.reset();
-        Serial.println("Odometry reset");
+        Serial.println("Commands: MODE:auto/manual/idle, PATH:x,y;..., CONFIG:r,b,speed,width,stop, CMD:forward/backward/left/right/stop, OBS:front,rear,left,right");
         return;
     }
     Serial.println("Unknown command");
@@ -407,12 +439,22 @@ void setup()
     }
     Serial.begin(115200);
     delay(1000);
-    Serial.println("=== ESP32 Robot (New Architecture) ===");
+    Serial.println("=== ESP32 Robot (Obstacle Avoidance) ===");
     pinMode(RIGHT_IR, INPUT);
     pinMode(LEFT_IR, INPUT);
-    lastLeftIRState = (analogRead(LEFT_IR) < IR_THRESHOLD) ? 0 : 1;
-    lastRightIRState = (analogRead(RIGHT_IR) < IR_THRESHOLD) ? 0 : 1;
+    
+    // Initialize IR states with independent thresholds
+    lastLeftIRState = (analogRead(LEFT_IR) < LEFT_IR_THRESHOLD) ? 0 : 1;
+    lastRightIRState = (analogRead(RIGHT_IR) < RIGHT_IR_THRESHOLD) ? 0 : 1;
+    
     lastTime = millis() / 1000.0;
+    
+    // Print IR configuration for debugging
+    Serial.printf("[IR Config] Left threshold: %d, Right threshold: %d\n", 
+                  LEFT_IR_THRESHOLD, RIGHT_IR_THRESHOLD);
+    Serial.printf("[IR Init] Left: %d (state: %d), Right: %d (state: %d)\n",
+                  analogRead(LEFT_IR), lastLeftIRState, 
+                  analogRead(RIGHT_IR), lastRightIRState);
     Serial.println("Ready.");
 }
 
@@ -462,7 +504,7 @@ void loop()
 
         if (autoMode)
         {
-            // Auto navigation
+            // Auto navigation (unchanged)
             if (pathActive && pathIndex < numWaypoints)
             {
                 double tx = pathPoints[pathIndex].x;
@@ -529,26 +571,66 @@ void loop()
             }
             else
             {
-                // Auto mode but no active path -> stay stopped
-                targetLeft = 0.0;
-                targetRight = 0.0;
+                targetLeft = targetRight = 0.0;
             }
         }
         else
         {
-            // Manual mode: compute wheel speeds from direction flags
+            // Manual mode
             float linear = (movingForward - movingBackward) * maxSpeed;
             float angular = (turningRight - turningLeft) * maxSpeed;
             targetLeft = linear + angular;
             targetRight = linear - angular;
         }
 
+        // ---- Obstacle avoidance (applies to all modes) ----
+        float targetLinear = (targetLeft + targetRight) * 0.5f;
+        float targetAngular = (targetLeft - targetRight) * 0.5f;
+
+        float stopDist = configStopDistance;
+        if (stopDist > 0.01f)
+        {
+            float threshold = 2.0f * stopDist;
+
+            // Linear scaling
+            float linearScale = 1.0f;
+            if (targetLinear > 0.05f && frontDist < threshold)
+            {
+                linearScale = (frontDist - stopDist) / stopDist;
+                linearScale = constrain(linearScale, 0.0f, 1.0f);
+            }
+            else if (targetLinear < -0.05f && rearDist < threshold)
+            {
+                linearScale = (rearDist - stopDist) / stopDist;
+                linearScale = constrain(linearScale, 0.0f, 1.0f);
+            }
+            targetLinear *= linearScale;
+
+            // Angular scaling
+            float angularScale = 1.0f;
+            if (targetAngular > 0.05f && leftDist < threshold)      // turning left
+            {
+                angularScale = (leftDist - stopDist) / stopDist;
+                angularScale = constrain(angularScale, 0.0f, 1.0f);
+            }
+            else if (targetAngular < -0.05f && rightDist < threshold) // turning right
+            {
+                angularScale = (rightDist - stopDist) / stopDist;
+                angularScale = constrain(angularScale, 0.0f, 1.0f);
+            }
+            targetAngular *= angularScale;
+        }
+
+        // Recombine
+        targetLeft = targetLinear + targetAngular;
+        targetRight = targetLinear - targetAngular;
+
         smoother.setTarget(targetLeft, targetRight);
         smoother.update(dt);
         setWheelSpeeds(smoother.getLeftSpeed(), smoother.getRightSpeed());
     }
 
-    // ---- Odometry and ODOM ----
+    // ---- Odometry broadcast ----
     if (now - lastOdomUpdate >= ODOM_UPDATE_INTERVAL)
     {
         lastOdomUpdate = now;
